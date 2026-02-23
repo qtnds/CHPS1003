@@ -26,199 +26,221 @@ class KarmanVortexSimulator:
     """
     Simulateur d'allée de tourbillons de von Kármán avec Lattice Boltzmann Method (LBM)
     Modèle D2Q9 (2D, 9 vitesses)
+
+    Stratégie "boîte large + fenêtre" :
+    - La simulation tourne sur une grille PHYSIQUE de taille (nx_phys × ny_phys).
+    - nx_phys = nx_win  + 2*pad_x  (marges gauche/droite)
+    - ny_phys = ny_win  + 2*pad_y  (marges haut/bas)
+    - Seule la fenêtre centrale (nx_win × ny_win) est extraite pour les GIFs et les
+      prédictions → toute perturbation de bord reste hors fenêtre.
     """
-    
-    def __init__(self, nx=600, ny=150, Re=150, U_inlet=0.08, obstacle_radius=15):
+
+    def __init__(self,
+                 nx_win=400, ny_win=100,   # taille de la fenêtre d'analyse
+                 pad_x=100,  pad_y=50,     # marges supplémentaires de chaque côté
+                 Re=150, U_inlet=0.08,
+                 obstacle_radius=15):
         """
-        Parameters:
-        -----------
-        nx, ny : dimensions de la grille
-        Re : nombre de Reynolds (contrôle la turbulence)
-        U_inlet : vitesse d'entrée [m/s]
-        obstacle_radius : rayon de l'obstacle cylindrique
+        Parameters
+        ----------
+        nx_win, ny_win : dimensions de la fenêtre d'analyse (GIFs / forecast)
+        pad_x, pad_y   : marges ajoutées de chaque côté (absorbent les effets de bord)
+        Re             : nombre de Reynolds
+        U_inlet        : vitesse d'entrée [lu/ts]
+        obstacle_radius: rayon du cylindre [lu]
         """
-        self.nx, self.ny = nx, ny
+        self.nx_win  = nx_win
+        self.ny_win  = ny_win
+        self.pad_x   = pad_x
+        self.pad_y   = pad_y
+
+        # Grille physique totale
+        self.nx = nx_win + 2 * pad_x
+        self.ny = ny_win + 2 * pad_y
+
         self.Re = Re
         self.U_inlet = U_inlet
         self.obstacle_radius = obstacle_radius
-        
+
         # Paramètres LBM
-        self.c = 1.0  # Vitesse du réseau
-        self.cs = self.c / np.sqrt(3)  # Vitesse du son
-        
-        # Viscosité cinématique: ν = U * D / Re
-        D = 2 * obstacle_radius
+        self.c  = 1.0
+        self.cs = self.c / np.sqrt(3)
+
+        D       = 2 * obstacle_radius
         self.nu = U_inlet * D / Re
-        
-        # Paramètre de relaxation: τ = 3ν + 0.5
-        self.tau = 3 * self.nu + 0.5
-        self.omega = 1.0 / self.tau  # Fréquence de collision
-        
-        print(f"   ω (omega) = {self.omega:.4f}")
-        
+        self.tau   = 3 * self.nu + 0.5
+        self.omega = 1.0 / self.tau
+
+        print(f"   τ = {self.tau:.4f},  ω = {self.omega:.4f}")
+
         # Vecteurs de vitesse D2Q9
         self.c_vec = np.array([
-            [0, 0],   # 0: repos
-            [1, 0],   # 1: droite
-            [0, 1],   # 2: haut
-            [-1, 0],  # 3: gauche
-            [0, -1],  # 4: bas
-            [1, 1],   # 5: diagonale NE
-            [-1, 1],  # 6: diagonale NW
-            [-1, -1], # 7: diagonale SW
-            [1, -1]   # 8: diagonale SE
+            [ 0,  0],  # 0
+            [ 1,  0],  # 1
+            [ 0,  1],  # 2
+            [-1,  0],  # 3
+            [ 0, -1],  # 4
+            [ 1,  1],  # 5
+            [-1,  1],  # 6
+            [-1, -1],  # 7
+            [ 1, -1],  # 8
         ])
-        
-        # Poids pour l'équilibre
-        self.w = np.array([4/9, 1/9, 1/9, 1/9, 1/9, 1/36, 1/36, 1/36, 1/36])
-        
-        # Fonctions de distribution (9 vitesses)
-        self.f = np.zeros((9, nx, ny), dtype=np.float32)
-        self.feq = np.zeros((9, nx, ny), dtype=np.float32)
-        
+        self.w = np.array([4/9, 1/9, 1/9, 1/9, 1/9,
+                           1/36, 1/36, 1/36, 1/36])
+
+        # Fonctions de distribution
+        self.f    = np.zeros((9, self.nx, self.ny), dtype=np.float32)
+        self.feq  = np.zeros((9, self.nx, self.ny), dtype=np.float32)
+
         # Champs macroscopiques
-        self.rho = np.ones((nx, ny), dtype=np.float32)
-        self.ux = np.zeros((nx, ny), dtype=np.float32)
-        self.uy = np.zeros((nx, ny), dtype=np.float32)
-        
-        # Créer l'obstacle (cylindre)
+        self.rho = np.ones( (self.nx, self.ny), dtype=np.float32)
+        self.ux  = np.zeros((self.nx, self.ny), dtype=np.float32)
+        self.uy  = np.zeros((self.nx, self.ny), dtype=np.float32)
+
+        # Obstacle (dans la grille physique)
         self.obstacle = self._create_cylinder_obstacle()
-        
-        # Initialiser l'écoulement
+
         self._initialize_flow()
-        
+
+        # Fenêtre d'extraction (indices dans la grille physique)
+        self.x0 = pad_x
+        self.x1 = pad_x + nx_win
+        self.y0 = pad_y
+        self.y1 = pad_y + ny_win
+
+        # Masque obstacle restreint à la fenêtre
+        self.obstacle_win = self.obstacle[self.x0:self.x1, self.y0:self.y1]
+
         print(f"\n🌊 Simulateur Allée de Karman (Lattice Boltzmann):")
-        print(f"   Grille: {nx}×{ny}")
-        print(f"   Reynolds: Re = {Re:.1f}")
-        print(f"   Vitesse entrée: U = {U_inlet:.3f} m/s")
-        print(f"   Viscosité: ν = {self.nu:.6f} m²/s")
-        print(f"   Paramètre relaxation: τ = {self.tau:.3f}")
-        print(f"   Obstacle: cylindre rayon {obstacle_radius} px")
-    
+        print(f"   Grille physique : {self.nx}×{self.ny}")
+        print(f"   Fenêtre analyse : {nx_win}×{ny_win}  "
+              f"(marges x={pad_x}, y={pad_y})")
+        print(f"   Reynolds : Re = {Re:.1f}")
+        print(f"   U_inlet  = {U_inlet:.3f}  ν = {self.nu:.6f}")
+        print(f"   τ = {self.tau:.3f}  ω = {self.omega:.4f}")
+        print(f"   Obstacle : cylindre r={obstacle_radius} px")
+
+    # ----------------------------------------------------------
     def _create_cylinder_obstacle(self):
-        """Crée un masque booléen pour l'obstacle cylindrique"""
-        cx, cy = self.nx // 5, self.ny // 2  # Plus en amont pour voir les tourbillons
-        
+        """Cylindre centré dans la grille physique, un peu en amont."""
+        # On le place dans le premier tiers de la fenêtre (pas de la grille totale)
+        cx = self.pad_x + self.nx_win // 4
+        cy = self.ny // 2
         X, Y = np.meshgrid(np.arange(self.nx), np.arange(self.ny), indexing='ij')
         obstacle = (X - cx)**2 + (Y - cy)**2 <= self.obstacle_radius**2
-        
-        print(f"   Position obstacle: ({cx}, {cy})")
+        print(f"   Position obstacle (grille physique): ({cx}, {cy})")
         return obstacle
-    
+
     def _initialize_flow(self):
-        """Initialise l'écoulement avec vitesse uniforme + perturbation"""
-        # Vitesse uniforme horizontale
+        """Vitesse uniforme + petite perturbation sinusoïdale."""
         self.ux[:] = self.U_inlet
         self.uy[:] = 0.0
         self.rho[:] = 1.0
-        
-        # IMPORTANT : Ajouter une petite perturbation pour déclencher l'instabilité de Karman
-        # Perturbation sinusoïdale en aval de l'obstacle
-        cx = self.nx // 5
+
+        cx = self.pad_x + self.nx_win // 4
         for i in range(cx + self.obstacle_radius + 5, self.nx):
             for j in range(self.ny):
-                # Perturbation en vitesse verticale
-                self.uy[i, j] += 0.01 * self.U_inlet * np.sin(2 * np.pi * j / self.ny * 4)
-        
-        # Initialiser les fonctions de distribution à l'équilibre
+                self.uy[i, j] += 0.01 * self.U_inlet * np.sin(
+                    2 * np.pi * j / self.ny * 4)
+
         for i in range(9):
             self.f[i] = self._equilibrium(i, self.rho, self.ux, self.uy)
-    
+
+    # ----------------------------------------------------------
     def _equilibrium(self, i, rho, ux, uy):
-        """Calcule la fonction d'équilibre pour la vitesse i"""
         cu = self.c_vec[i, 0] * ux + self.c_vec[i, 1] * uy
         u2 = ux**2 + uy**2
-        
-        feq = self.w[i] * rho * (
-            1 + 3 * cu / self.c**2 +
-            4.5 * cu**2 / self.c**4 -
-            1.5 * u2 / self.c**2
-        )
-        return feq
-    
+        return self.w[i] * rho * (
+            1 + 3*cu/self.c**2 + 4.5*cu**2/self.c**4 - 1.5*u2/self.c**2)
+
     def _streaming(self):
-        """Étape de streaming (advection)"""
-        for i in range(1, 9):  # Ignorer la vitesse de repos
+        for i in range(1, 9):
             self.f[i] = np.roll(self.f[i], self.c_vec[i, 0], axis=0)
             self.f[i] = np.roll(self.f[i], self.c_vec[i, 1], axis=1)
-    
+
     def _macroscopic(self):
-        """Calcule les variables macroscopiques à partir de f"""
         self.rho = np.sum(self.f, axis=0)
-        self.ux = np.sum(self.f * self.c_vec[:, 0, None, None], axis=0) / self.rho
-        self.uy = np.sum(self.f * self.c_vec[:, 1, None, None], axis=0) / self.rho
-    
+        self.ux  = np.sum(self.f * self.c_vec[:, 0, None, None], axis=0) / self.rho
+        self.uy  = np.sum(self.f * self.c_vec[:, 1, None, None], axis=0) / self.rho
+
     def _collision(self):
-        """Étape de collision (BGK)"""
         for i in range(9):
             self.feq[i] = self._equilibrium(i, self.rho, self.ux, self.uy)
-            self.f[i] += self.omega * (self.feq[i] - self.f[i])
-    
+            self.f[i]  += self.omega * (self.feq[i] - self.f[i])
+
     def _boundary_conditions(self):
-        """Applique les conditions aux limites"""
-        # Entrée (Zou-He): vitesse imposée
+        """Conditions aux limites sur la GRILLE PHYSIQUE.
+
+        Entrée (x=0) : vitesse imposée Zou-He.
+        Sortie (x=-1): gradient nul (outflow).
+        Parois (y=0, y=-1) : bounce-back — ces parois sont dans les marges,
+            donc hors de la fenêtre d'analyse → leur artefact n'est pas vu.
+        Obstacle : bounce-back total.
+        """
+        # --- Entrée (hors fenêtre grâce au pad_x) ---
         self.ux[0, :] = self.U_inlet
         self.uy[0, :] = 0.0
         self.rho[0, :] = (
             self.f[0, 0, :] + self.f[2, 0, :] + self.f[4, 0, :] +
-            2 * (self.f[3, 0, :] + self.f[6, 0, :] + self.f[7, 0, :])
+            2*(self.f[3, 0, :] + self.f[6, 0, :] + self.f[7, 0, :])
         ) / (1 - self.ux[0, :])
-        
-        # Réinitialiser les distributions à l'entrée
         for i in range(9):
-            self.f[i, 0, :] = self._equilibrium(i, self.rho[0, :], 
-                                               self.ux[0, :], self.uy[0, :])
-        
-        # Sortie: gradient nul (extrapolation)
+            self.f[i, 0, :] = self._equilibrium(
+                i, self.rho[0, :], self.ux[0, :], self.uy[0, :])
+
+        # --- Sortie (hors fenêtre) ---
         self.f[:, -1, :] = self.f[:, -2, :]
-        
-        # Parois haut/bas: bounce-back
-        self.f[2, :, -1] = self.f[4, :, -1]  # Haut
+
+        # --- Parois haut/bas (hors fenêtre grâce au pad_y) ---
+        # Paroi y_max
+        self.f[2, :, -1] = self.f[4, :, -1]
         self.f[5, :, -1] = self.f[7, :, -1]
         self.f[6, :, -1] = self.f[8, :, -1]
-        
-        self.f[4, :, 0] = self.f[2, :, 0]    # Bas
-        self.f[7, :, 0] = self.f[5, :, 0]
-        self.f[8, :, 0] = self.f[6, :, 0]
-        
-        # Obstacle: bounce-back total
+        # Paroi y_min
+        self.f[4, :,  0] = self.f[2, :,  0]
+        self.f[7, :,  0] = self.f[5, :,  0]
+        self.f[8, :,  0] = self.f[6, :,  0]
+
+        # --- Obstacle ---
+        opp = [0, 3, 4, 1, 2, 7, 8, 5, 6]
         for i in range(9):
-            # Vitesse opposée
-            i_opp = [0, 3, 4, 1, 2, 7, 8, 5, 6][i]
-            self.f[i_opp, self.obstacle] = self.f[i, self.obstacle]
-    
+            self.f[opp[i], self.obstacle] = self.f[i, self.obstacle]
+
+    # ----------------------------------------------------------
     def step(self):
-        """Un pas de temps LBM"""
+        """Un pas de temps LBM ; retourne la vorticité sur la FENÊTRE."""
         self._streaming()
         self._macroscopic()
         self._collision()
         self._boundary_conditions()
-        
-        # Retourner la vorticité (pour visualisation)
-        return self.compute_vorticity()
-    
+        return self._vorticity_window()
+
+    def _vorticity_window(self):
+        """Vorticité ω = ∂uy/∂x − ∂ux/∂y extraite sur la fenêtre centrale."""
+        ux_w = self.ux[self.x0:self.x1, self.y0:self.y1]
+        uy_w = self.uy[self.x0:self.x1, self.y0:self.y1]
+        duy_dx = np.gradient(uy_w, axis=0)
+        dux_dy = np.gradient(ux_w, axis=1)
+        return duy_dx - dux_dy
+
     def compute_vorticity(self):
-        """Calcule la vorticité ω = ∂uy/∂x - ∂ux/∂y"""
-        duy_dx = np.gradient(self.uy, axis=0)
-        dux_dy = np.gradient(self.ux, axis=1)
-        vorticity = duy_dx - dux_dy
-        return vorticity
-    
+        return self._vorticity_window()
+
+    # ----------------------------------------------------------
     def simulate(self, nt):
-        """Simule nt pas de temps"""
-        vorticity_history = np.zeros((nt, self.nx, self.ny), dtype=np.float32)
-        
-        print(f"\n⏳ Simulation de l'allée de Karman ({nt} pas)...")
-        
+        """Simule nt pas ; retourne l'historique de vorticité sur la fenêtre."""
+        vorticity_history = np.zeros(
+            (nt, self.nx_win, self.ny_win), dtype=np.float32)
+
+        print(f"\n⏳ Simulation Allée de Karman ({nt} pas) …")
         for t in range(nt):
             vorticity_history[t] = self.step()
-            
             if (t + 1) % 50 == 0:
                 u_mag = np.sqrt(self.ux**2 + self.uy**2)
                 print(f"   t={t+1:4d}: U_max={u_mag.max():.4f}, "
                       f"ω_max={np.abs(vorticity_history[t]).max():.4f}")
-        
-        print("✓ Simulation terminée!")
+
+        print("✓ Simulation terminée !")
         return vorticity_history
 
 
@@ -228,12 +250,12 @@ class KarmanVortexSimulator:
 
 class LSTMForecaster(nn.Module):
     def __init__(self, input_size=1, hidden_size=64, num_layers=2):
-        super(LSTMForecaster, self).__init__()
+        super().__init__()
         self.hidden_size = hidden_size
-        self.num_layers = num_layers
+        self.num_layers  = num_layers
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
-    
+        self.fc   = nn.Linear(hidden_size, 1)
+
     def forward(self, x):
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
@@ -244,71 +266,59 @@ class LSTMForecaster(nn.Module):
 def train_lstm(timeseries, horizon, epochs=30, batch_size=64, device='cpu'):
     N, T = timeseries.shape
     X_train = torch.FloatTensor(timeseries[:, :-horizon]).unsqueeze(-1).to(device)
-    
-    model = LSTMForecaster().to(device)
+
+    model     = LSTMForecaster().to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    
-    print(f"\n🧠 Entraînement LSTM ({epochs} epochs)...")
+
+    print(f"\n🧠 Entraînement LSTM ({epochs} epochs) …")
     model.train()
-    
     for epoch in range(epochs):
         total_loss = 0
         for i in range(0, N, batch_size):
-            batch = X_train[i:i+batch_size]
+            batch  = X_train[i:i+batch_size]
+            target = torch.FloatTensor(
+                timeseries[i:i+batch_size, -horizon]).unsqueeze(-1).to(device)
             optimizer.zero_grad()
-            pred = model(batch)
-            target = torch.FloatTensor(timeseries[i:i+batch_size, -horizon]).unsqueeze(-1).to(device)
-            loss = criterion(pred, target)
+            loss = criterion(model(batch), target)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-        
         if (epoch + 1) % 10 == 0:
-            print(f"   Epoch {epoch+1}/{epochs}, Loss: {total_loss/N:.6f}")
-    
+            print(f"   Epoch {epoch+1}/{epochs}  loss={total_loss/N:.6f}")
     return model
 
 
 def forecast_lstm(model, timeseries, horizon, device='cpu'):
     model.eval()
-    N, T = timeseries.shape
+    N = timeseries.shape[0]
     predictions = np.zeros((N, horizon), dtype=np.float32)
-    
     with torch.no_grad():
         for i in range(N):
-            context = timeseries[i:i+1, :]
-            pred_series = []
-            
-            for h in range(horizon):
-                x = torch.FloatTensor(context).unsqueeze(-1).to(device)
+            context    = timeseries[i:i+1, :]
+            pred_list  = []
+            for _ in range(horizon):
+                x    = torch.FloatTensor(context).unsqueeze(-1).to(device)
                 pred = model(x).cpu().numpy()[0, 0]
-                pred_series.append(pred)
+                pred_list.append(pred)
                 context = np.append(context[0, 1:], pred).reshape(1, -1)
-            
-            predictions[i] = pred_series
-    
+            predictions[i] = pred_list
     return predictions
 
 
 def forecast_arima(timeseries, horizon):
-    N, T = timeseries.shape
+    N = timeseries.shape[0]
     predictions = np.zeros((N, horizon), dtype=np.float32)
-    
-    print(f"\n📊 Prédiction ARIMA ({N} séries)...")
-    
+    print(f"\n📊 Prédiction ARIMA ({N} séries) …")
     for i in range(N):
         try:
-            model = ARIMA(timeseries[i], order=(1, 0, 0))
-            fitted = model.fit(method='yule_walker')
+            fitted = ARIMA(timeseries[i], order=(1, 0, 0)).fit(method='yule_walker')
             predictions[i] = fitted.forecast(steps=horizon)
-        except:
+        except Exception:
             predictions[i] = timeseries[i, -1]
-        
         if (i + 1) % 2000 == 0:
-            print(f"   [{i+1}/{N}] séries traitées")
-    
-    print("✓ ARIMA terminé!")
+            print(f"   [{i+1}/{N}]")
+    print("✓ ARIMA terminé !")
     return predictions
 
 
@@ -318,20 +328,16 @@ def volume_to_timeseries(volume):
 
 
 def timeseries_to_volume(timeseries, spatial_shape):
-    N, T = timeseries.shape
     X, Y = spatial_shape
-    return timeseries.T.reshape(T, X, Y)
+    return timeseries.T.reshape(-1, X, Y)
 
 
 class TimesFMForecaster:
     def __init__(self, max_context=512, max_horizon=128):
         torch.set_float32_matmul_precision("high")
-        
-        print("\n🤖 Chargement TimesFM...")
+        print("\n🤖 Chargement TimesFM …")
         self.model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(
-            "google/timesfm-2.5-200m-pytorch"
-        )
-        
+            "google/timesfm-2.5-200m-pytorch")
         self.model.compile(
             timesfm.ForecastConfig(
                 max_context=max_context,
@@ -339,172 +345,142 @@ class TimesFMForecaster:
                 normalize_inputs=True,
                 use_continuous_quantile_head=True,
                 force_flip_invariance=True,
-                infer_is_positive=False,  # Vorticité peut être négative
+                infer_is_positive=False,
                 fix_quantile_crossing=True,
-            )
-        )
+            ))
         print("✓ TimesFM prêt")
-    
+
     def forecast(self, timeseries, horizon, batch_size=64):
         N = len(timeseries)
         point_all = []
-        
-        print(f"\n🔮 Prédiction TimesFM ({N} séries)...")
+        print(f"\n🔮 Prédiction TimesFM ({N} séries) …")
         for i in range(0, N, batch_size):
-            batch = timeseries[i:i + batch_size]
-            inputs = [series.astype(np.float32) for series in batch]
-            points, _ = self.model.forecast(horizon=horizon, inputs=inputs)
-            point_all.append(points)
-            
+            batch  = [s.astype(np.float32) for s in timeseries[i:i+batch_size]]
+            pts, _ = self.model.forecast(horizon=horizon, inputs=batch)
+            point_all.append(pts)
             if (i + batch_size) % 1000 == 0:
-                print(f"   [{min(i + batch_size, N)}/{N}] séries")
-        
-        print("✓ TimesFM terminé!")
+                print(f"   [{min(i+batch_size, N)}/{N}]")
+        print("✓ TimesFM terminé !")
         return np.vstack(point_all)
 
 
 # ============================================================
-# 3. CRÉATION DE GIFS
+# 3. CRÉATION DE GIFs  (données déjà dans la fenêtre)
 # ============================================================
 
-def create_animation_gif(volume, title, filename, fps=20, vmin=None, vmax=None, obstacle=None):
-    """Crée un GIF animé de l'évolution temporelle avec fond noir"""
-    print(f"\n🎬 Création du GIF: {filename}...")
-    
-    nt = volume.shape[0]
-    
-    if vmin is None:
-        vmin = volume.min()
-    if vmax is None:
-        vmax = volume.max()
-    
-    # Colormap personnalisée: noir -> bleu -> cyan -> jaune -> rouge
+def _bw_cmap():
     from matplotlib.colors import LinearSegmentedColormap
-    colors = ['#000000', '#0000ff', '#00ffff', '#ffff00', '#ff0000']
-    n_bins = 150
-    cmap = LinearSegmentedColormap.from_list('karman', colors, N=n_bins)
-    
+    colors = ['#000000','#0a0a0a','#1a1a1a','#404040',
+              '#808080','#d0d0d0','#ffffff','#ffffff']
+    cmap = LinearSegmentedColormap.from_list('karman_bw', colors, N=256)
+    cmap.set_under('black')
+    return cmap
+
+
+def create_animation_gif(volume, title, filename,
+                         fps=20, obstacle_win=None):
+    """GIF sur les données déjà extraites (fenêtre centrale uniquement)."""
+    print(f"\n🎬 Création du GIF : {filename} …")
+    nt = volume.shape[0]
+
+    vort_abs  = np.abs(volume)
+    threshold = np.percentile(vort_abs, 85)
+    vmax_sym  = np.percentile(vort_abs, 98)
+    cmap      = _bw_cmap()
+
     fig, ax = plt.subplots(figsize=(12, 4), facecolor='black')
     ax.set_facecolor('black')
-    
+
     def update(frame):
-        ax.clear()
-        ax.set_facecolor('black')
-        
-        # Afficher la vorticité
-        im = ax.imshow(volume[frame].T, cmap=cmap, origin='lower',
-                      aspect='auto', vmin=vmin, vmax=vmax)
-        
-        # Superposer l'obstacle en blanc
-        if obstacle is not None:
-            obstacle_mask = np.ma.masked_where(~obstacle, obstacle)
-            ax.imshow(obstacle_mask.T, cmap='gray', origin='lower',
-                     aspect='auto', alpha=1.0, vmin=0, vmax=1)
-        
-        ax.set_title(f'{title} - Frame {frame}/{nt-1}', 
-                    fontsize=14, fontweight='bold', color='white')
-        ax.set_xlabel('X (direction écoulement)', color='white')
-        ax.set_ylabel('Y (largeur)', color='white')
+        ax.clear(); ax.set_facecolor('black')
+        vf = np.abs(volume[frame])
+        ve = np.clip(np.power(vf / vmax_sym, 0.6) * vmax_sym, 0, vmax_sym)
+        ax.imshow(ve.T, cmap=cmap, origin='lower', aspect='auto',
+                  vmin=threshold*0.2, vmax=vmax_sym, interpolation='bilinear')
+        if obstacle_win is not None:
+            mask = np.ma.masked_where(~obstacle_win, obstacle_win)
+            ax.imshow(mask.T, cmap='gray', origin='lower',
+                      aspect='auto', alpha=1.0, vmin=0, vmax=1)
+        ax.set_title(f'{title} — t={frame}/{nt-1}',
+                     fontsize=13, fontweight='bold', color='white')
+        ax.set_xlabel('X (écoulement)', color='white')
+        ax.set_ylabel('Y', color='white')
         ax.tick_params(colors='white')
-        for spine in ax.spines.values():
-            spine.set_edgecolor('white')
-        return [im]
-    
-    anim = FuncAnimation(fig, update, frames=nt, interval=1000//fps, blit=True)
-    
+        for sp in ax.spines.values(): sp.set_edgecolor('white')
+
+    anim = FuncAnimation(fig, update, frames=nt,
+                         interval=1000//fps, blit=False)
     path = os.path.join(RESULTS_DIR, f"{filename}.gif")
-    writer = PillowWriter(fps=fps)
-    anim.save(path, writer=writer, savefig_kwargs={'facecolor': 'black'})
+    anim.save(path, writer=PillowWriter(fps=fps),
+              savefig_kwargs={'facecolor': 'black'})
     plt.close()
-    
-    print(f"   ✓ Sauvegardé: {filename}.gif ({nt} frames)")
+    print(f"   ✓ {filename}.gif  ({nt} frames)")
 
 
-def create_comparison_gif(true_vol, pred_timesfm, pred_arima, pred_lstm, 
-                         filename="comparison", fps=15, obstacle=None):
-    """Crée un GIF comparant les 4 méthodes côte à côte avec fond noir"""
-    print(f"\n🎬 Création du GIF comparatif...")
-    
+def create_comparison_gif(true_vol, pred_timesfm, pred_arima, pred_lstm,
+                          filename="comparison", fps=15, obstacle_win=None):
+    """GIF comparatif 2×2, données déjà dans la fenêtre."""
+    print(f"\n🎬 Création du GIF comparatif …")
     nt = true_vol.shape[0]
-    vmin = min(true_vol.min(), pred_timesfm.min(), pred_arima.min(), pred_lstm.min())
-    vmax = max(true_vol.max(), pred_timesfm.max(), pred_arima.max(), pred_lstm.max())
-    
-    # Colormap personnalisée
-    from matplotlib.colors import LinearSegmentedColormap
-    colors = ['#000000', '#0000ff', '#00ffff', '#ffff00', '#ff0000']
-    cmap = LinearSegmentedColormap.from_list('karman', colors, N=256)
-    
+
+    vort_all  = np.concatenate([np.abs(v) for v in
+                                 [true_vol, pred_timesfm, pred_arima, pred_lstm]])
+    threshold = np.percentile(vort_all, 85)
+    vmax_sym  = np.percentile(vort_all, 98)
+    cmap      = _bw_cmap()
+
     fig, axes = plt.subplots(2, 2, figsize=(16, 8), facecolor='black')
-    fig.suptitle('Comparaison des prédictions - Allée de Karman', 
-                fontsize=16, fontweight='bold', color='white')
-    
-    titles = ['Ground Truth', 'TimesFM', 'ARIMA', 'LSTM']
-    
+    fig.suptitle('Comparaison prédictions — Allée de Kármán',
+                 fontsize=15, fontweight='bold', color='white')
+    titles  = ['Ground Truth', 'TimesFM', 'ARIMA', 'LSTM']
+    volumes = [true_vol, pred_timesfm, pred_arima, pred_lstm]
+
     def update(frame):
-        for idx, (ax, vol, title) in enumerate(zip(axes.flat, 
-                                                    [true_vol, pred_timesfm, pred_arima, pred_lstm],
-                                                    titles)):
-            ax.clear()
-            ax.set_facecolor('black')
-            
-            im = ax.imshow(vol[frame].T, cmap=cmap, origin='lower',
-                          aspect='auto', vmin=vmin, vmax=vmax)
-            
-            # Superposer l'obstacle
-            if obstacle is not None:
-                obstacle_mask = np.ma.masked_where(~obstacle, obstacle)
-                ax.imshow(obstacle_mask.T, cmap='gray', origin='lower',
-                         aspect='auto', alpha=1.0, vmin=0, vmax=1)
-            
-            ax.set_title(f'{title} (t={frame})', fontsize=12, color='white')
-            ax.set_xlabel('X', color='white')
-            ax.set_ylabel('Y', color='white')
+        for ax, vol, title in zip(axes.flat, volumes, titles):
+            ax.clear(); ax.set_facecolor('black')
+            vf = np.abs(vol[frame])
+            ve = np.clip(np.power(vf / vmax_sym, 0.6) * vmax_sym, 0, vmax_sym)
+            ax.imshow(ve.T, cmap=cmap, origin='lower', aspect='auto',
+                      vmin=threshold*0.2, vmax=vmax_sym, interpolation='bilinear')
+            if obstacle_win is not None:
+                mask = np.ma.masked_where(~obstacle_win, obstacle_win)
+                ax.imshow(mask.T, cmap='gray', origin='lower',
+                          aspect='auto', alpha=1.0, vmin=0, vmax=1)
+            ax.set_title(f'{title}  (t={frame})', fontsize=11, color='white')
+            ax.set_xlabel('X', color='white'); ax.set_ylabel('Y', color='white')
             ax.tick_params(colors='white')
-            for spine in ax.spines.values():
-                spine.set_edgecolor('white')
-        
-        return axes.flat
-    
-    anim = FuncAnimation(fig, update, frames=nt, interval=1000//fps, blit=False)
-    
+            for sp in ax.spines.values(): sp.set_edgecolor('white')
+
+    anim = FuncAnimation(fig, update, frames=nt,
+                         interval=1000//fps, blit=False)
     path = os.path.join(RESULTS_DIR, f"{filename}.gif")
-    writer = PillowWriter(fps=fps)
-    anim.save(path, writer=writer, savefig_kwargs={'facecolor': 'black'})
+    anim.save(path, writer=PillowWriter(fps=fps),
+              savefig_kwargs={'facecolor': 'black'})
     plt.close()
-    
-    print(f"   ✓ Sauvegardé: {filename}.gif")
+    print(f"   ✓ {filename}.gif")
 
 
 def plot_errors_comparison(errors_dict, filename="errors"):
-    """Graphique de comparaison des performances"""
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-    
-    models = list(errors_dict.keys())
-    mae_vals = [errors_dict[m]['mae'] for m in models]
+    models    = list(errors_dict.keys())
+    mae_vals  = [errors_dict[m]['mae']  for m in models]
     rmse_vals = [errors_dict[m]['rmse'] for m in models]
-    times = [errors_dict[m]['time'] for m in models]
-    
-    colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A']
-    
-    axes[0].bar(models, mae_vals, color=colors[:len(models)])
-    axes[0].set_ylabel('MAE', fontsize=12)
-    axes[0].set_title('Mean Absolute Error', fontsize=13, fontweight='bold')
-    axes[0].grid(axis='y', alpha=0.3)
-    
-    axes[1].bar(models, rmse_vals, color=colors[:len(models)])
-    axes[1].set_ylabel('RMSE', fontsize=12)
-    axes[1].set_title('Root Mean Square Error', fontsize=13, fontweight='bold')
-    axes[1].grid(axis='y', alpha=0.3)
-    
-    axes[2].bar(models, times, color=colors[:len(models)])
-    axes[2].set_ylabel('Temps (s)', fontsize=12)
-    axes[2].set_title('Temps d\'exécution', fontsize=13, fontweight='bold')
-    axes[2].grid(axis='y', alpha=0.3)
-    
+    times     = [errors_dict[m]['time'] for m in models]
+    colors    = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A']
+
+    for ax, vals, label in zip(axes,
+                                [mae_vals, rmse_vals, times],
+                                ['MAE', 'RMSE', "Temps (s)"]):
+        ax.bar(models, vals, color=colors[:len(models)])
+        ax.set_ylabel(label, fontsize=12)
+        ax.set_title(label, fontsize=13, fontweight='bold')
+        ax.grid(axis='y', alpha=0.3)
+
     plt.tight_layout()
-    plt.savefig(os.path.join(RESULTS_DIR, f"{filename}.png"), dpi=150, bbox_inches='tight')
+    plt.savefig(os.path.join(RESULTS_DIR, f"{filename}.png"),
+                dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"   Sauvegardé: {filename}.png")
+    print(f"   Sauvegardé : {filename}.png")
 
 
 # ============================================================
@@ -513,311 +489,194 @@ def plot_errors_comparison(errors_dict, filename="errors"):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Simulation Allée de Karman avec comparaison TimesFM/ARIMA/LSTM",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    
-    parser.add_argument("--nx", type=int, default=600,
-                       help="Longueur de la grille (recommandé: 600)")
-    parser.add_argument("--ny", type=int, default=150,
-                       help="Largeur de la grille (recommandé: 150)")
-    parser.add_argument("--total", type=int, default=1000,
-                       help="Nombre total de pas de temps (min 800 pour Karman)")
+        description="Allée de Kármán — comparaison TimesFM / ARIMA / LSTM",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    # --- fenêtre d'analyse (ce que l'on affiche / prédit) ---
+    parser.add_argument("--nx-win",  type=int, default=400,
+                        help="Largeur fenêtre analyse")
+    parser.add_argument("--ny-win",  type=int, default=100,
+                        help="Hauteur fenêtre analyse")
+    # --- marges pour éloigner les bords ---
+    parser.add_argument("--pad-x",   type=int, default=100,
+                        help="Marge gauche/droite (grille physique = nx-win + 2*pad-x)")
+    parser.add_argument("--pad-y",   type=int, default=50,
+                        help="Marge haut/bas    (grille physique = ny-win + 2*pad-y)")
+
+    parser.add_argument("--total",   type=int, default=1000,
+                        help="Pas de temps totaux")
     parser.add_argument("--horizon", type=int, default=200,
-                       help="Horizon de prédiction")
-    parser.add_argument("--Re", type=float, default=150,
-                       help="Nombre de Reynolds (100-300 pour Karman, 150 optimal)")
-    parser.add_argument("--obstacle-radius", type=int, default=15,
-                       help="Rayon de l'obstacle")
-    parser.add_argument("--skip-arima", action="store_true",
-                       help="Sauter ARIMA")
-    parser.add_argument("--lstm-epochs", type=int, default=20,
-                       help="Epochs LSTM")
-    parser.add_argument("--gif-fps", type=int, default=20,
-                       help="FPS des GIFs")
-    
+                        help="Horizon de prédiction")
+    parser.add_argument("--Re",      type=float, default=150,
+                        help="Nombre de Reynolds")
+    parser.add_argument("--obstacle-radius", type=int, default=15)
+    parser.add_argument("--skip-arima",      action="store_true")
+    parser.add_argument("--lstm-epochs",     type=int, default=20)
+    parser.add_argument("--gif-fps",         type=int, default=20)
+
     args = parser.parse_args()
-    
+
     if args.horizon >= args.total:
-        raise ValueError(f"horizon < total requis")
-    
+        raise ValueError("horizon doit être < total")
+
     context_len = args.total - args.horizon
-    
+
     print("=" * 70)
     print("ALLÉE DE TOURBILLONS DE VON KÁRMÁN")
-    print("Comparaison: TimesFM vs ARIMA vs LSTM")
+    print("Comparaison : TimesFM vs ARIMA vs LSTM")
     print("=" * 70)
-    print(f"\nParamètres:")
-    print(f"  Grille: {args.nx}×{args.ny}")
-    print(f"  Total: {args.total}, Contexte: {context_len}, Horizon: {args.horizon}")
-    print(f"  Reynolds: Re = {args.Re:.1f}")
-    print(f"\n⚠️  NOTE: Les tourbillons de Karman se développent progressivement.")
-    print(f"  Attendez ~300-500 pas de temps pour voir les structures tourbillonnaires!")
-    print(f"  Re optimal: 100-300 (150 recommandé)")
-    print(f"  Position obstacle: nx/5 pour laisser place aux tourbillons en aval")
-    
-    # ============================================================
+    print(f"\n  Fenêtre affichée  : {args.nx_win}×{args.ny_win}")
+    print(f"  Marges (pad)      : x={args.pad_x}, y={args.pad_y}")
+    print(f"  Grille physique   : "
+          f"{args.nx_win+2*args.pad_x}×{args.ny_win+2*args.pad_y}")
+    print(f"  Total / contexte / horizon : "
+          f"{args.total} / {context_len} / {args.horizon}")
+    print(f"  Re = {args.Re}")
+
+    # --------------------------------------------------------
     # 1. SIMULATION
-    # ============================================================
-    print("\n" + "=" * 70)
-    print("SIMULATION LATTICE BOLTZMANN")
-    print("=" * 70)
-    
-    simulator = KarmanVortexSimulator(
-        nx=args.nx, ny=args.ny,
+    # --------------------------------------------------------
+    sim = KarmanVortexSimulator(
+        nx_win=args.nx_win, ny_win=args.ny_win,
+        pad_x=args.pad_x,   pad_y=args.pad_y,
         Re=args.Re,
         U_inlet=0.1,
-        obstacle_radius=args.obstacle_radius
+        obstacle_radius=args.obstacle_radius,
     )
-    
-    start_sim = time.time()
-    vorticity_full = simulator.simulate(args.total)
-    time_sim = time.time() - start_sim
-    
-    print(f"\n✓ Simulation: {time_sim:.2f}s, shape={vorticity_full.shape}")
-    
-    # GIF simulation exacte
-    create_animation_gif(vorticity_full, "Simulation Exacte - Allée de Karman", 
-                        "simulation_exact", fps=args.gif_fps, obstacle=simulator.obstacle)
-    
-    # Séparer contexte/futur
+
+    t0 = time.time()
+    vorticity_full = sim.simulate(args.total)   # shape (total, nx_win, ny_win)
+    time_sim = time.time() - t0
+    print(f"\n✓ Simulation : {time_sim:.2f}s  —  shape={vorticity_full.shape}")
+
+    create_animation_gif(vorticity_full,
+                         "Simulation exacte — Allée de Kármán",
+                         "simulation_exact",
+                         fps=args.gif_fps,
+                         obstacle_win=sim.obstacle_win)
+
+    # Séparer contexte / futur
     vort_context = vorticity_full[:context_len]
-    vort_future = vorticity_full[context_len:context_len + args.horizon]
-    
-    timeseries_context = volume_to_timeseries(vort_context)
-    print(f"\n📈 Séries: {timeseries_context.shape[0]} × {timeseries_context.shape[1]}")
-    
-    # ============================================================
+    vort_future  = vorticity_full[context_len:]
+
+    ts_context   = volume_to_timeseries(vort_context)   # (N_pixels, context_len)
+    spatial_shape = (args.nx_win, args.ny_win)
+    print(f"\n📈 Séries temporelles : {ts_context.shape[0]} × {ts_context.shape[1]}")
+
+    # --------------------------------------------------------
     # 2. PRÉDICTIONS
-    # ============================================================
+    # --------------------------------------------------------
     errors_dict = {}
-    spatial_shape = (args.nx, args.ny)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"\n🖥️  Device: {device}")
-    
+    print(f"\n🖥️  Device : {device}")
+
     # --- TimesFM ---
-    print("\n" + "=" * 70)
-    print("TIMESFM")
-    print("=" * 70)
-    
-    forecaster_timesfm = TimesFMForecaster(max_context=context_len, max_horizon=args.horizon)
-    start = time.time()
-    pred_timesfm = forecaster_timesfm.forecast(timeseries_context, args.horizon, batch_size=64)
-    time_timesfm = time.time() - start
-    
-    vol_pred_timesfm = timeseries_to_volume(pred_timesfm, spatial_shape)
-    
-    mae_tf = np.mean(np.abs(vort_future - vol_pred_timesfm))
-    rmse_tf = np.sqrt(np.mean((vort_future - vol_pred_timesfm)**2))
-    errors_dict['TimesFM'] = {'mae': mae_tf, 'rmse': rmse_tf, 'time': time_timesfm}
-    
-    print(f"\n✓ TimesFM: MAE={mae_tf:.4f}, RMSE={rmse_tf:.4f}, Temps={time_timesfm:.2f}s")
-    
-    # GIF TimesFM
-    create_animation_gif(vol_pred_timesfm, "Prédiction TimesFM", 
-                        "prediction_timesfm", fps=args.gif_fps,
-                        vmin=vorticity_full.min(), vmax=vorticity_full.max(),
-                        obstacle=simulator.obstacle)
-    
+    print("\n" + "="*70)
+    forecaster_tfm = TimesFMForecaster(
+        max_context=context_len, max_horizon=args.horizon)
+    t0 = time.time()
+    pred_tfm = forecaster_tfm.forecast(ts_context, args.horizon)
+    time_tfm = time.time() - t0
+    vol_tfm  = timeseries_to_volume(pred_tfm, spatial_shape)
+    mae_tfm  = float(np.mean(np.abs(vort_future - vol_tfm)))
+    rmse_tfm = float(np.sqrt(np.mean((vort_future - vol_tfm)**2)))
+    errors_dict['TimesFM'] = dict(mae=mae_tfm, rmse=rmse_tfm, time=time_tfm)
+    print(f"✓ TimesFM : MAE={mae_tfm:.4f}  RMSE={rmse_tfm:.4f}  t={time_tfm:.2f}s")
+    create_animation_gif(vol_tfm, "Prédiction TimesFM", "prediction_timesfm",
+                         fps=args.gif_fps, obstacle_win=sim.obstacle_win)
+
     # --- ARIMA ---
     if not args.skip_arima:
-        print("\n" + "=" * 70)
-        print("ARIMA")
-        print("=" * 70)
-        
-        start = time.time()
-        pred_arima = forecast_arima(timeseries_context, args.horizon)
-        time_arima = time.time() - start
-        
-        vol_pred_arima = timeseries_to_volume(pred_arima, spatial_shape)
-        
-        mae_ar = np.mean(np.abs(vort_future - vol_pred_arima))
-        rmse_ar = np.sqrt(np.mean((vort_future - vol_pred_arima)**2))
-        errors_dict['ARIMA'] = {'mae': mae_ar, 'rmse': rmse_ar, 'time': time_arima}
-        
-        print(f"\n✓ ARIMA: MAE={mae_ar:.4f}, RMSE={rmse_ar:.4f}, Temps={time_arima:.2f}s")
-        
-        create_animation_gif(vol_pred_arima, "Prédiction ARIMA",
-                            "prediction_arima", fps=args.gif_fps,
-                            vmin=vorticity_full.min(), vmax=vorticity_full.max(),
-                            obstacle=simulator.obstacle)
+        print("\n" + "="*70)
+        t0 = time.time()
+        pred_ar = forecast_arima(ts_context, args.horizon)
+        time_ar = time.time() - t0
+        vol_ar  = timeseries_to_volume(pred_ar, spatial_shape)
+        mae_ar  = float(np.mean(np.abs(vort_future - vol_ar)))
+        rmse_ar = float(np.sqrt(np.mean((vort_future - vol_ar)**2)))
+        errors_dict['ARIMA'] = dict(mae=mae_ar, rmse=rmse_ar, time=time_ar)
+        print(f"✓ ARIMA : MAE={mae_ar:.4f}  RMSE={rmse_ar:.4f}  t={time_ar:.2f}s")
+        create_animation_gif(vol_ar, "Prédiction ARIMA", "prediction_arima",
+                             fps=args.gif_fps, obstacle_win=sim.obstacle_win)
     else:
         print("\n⚠️  ARIMA ignoré")
-        vol_pred_arima = np.zeros_like(vort_future)
-    
+        vol_ar = np.zeros_like(vort_future)
+        errors_dict['ARIMA'] = dict(mae=0., rmse=0., time=0.)
+
     # --- LSTM ---
-    print("\n" + "=" * 70)
-    print("LSTM")
-    print("=" * 70)
-    
-    start_train = time.time()
-    lstm_model = train_lstm(timeseries_context, args.horizon, 
-                           epochs=args.lstm_epochs, batch_size=64, device=device)
-    time_train = time.time() - start_train
-    
-    start_pred = time.time()
-    pred_lstm = forecast_lstm(lstm_model, timeseries_context, args.horizon, device=device)
-    time_pred = time.time() - start_pred
-    time_lstm = time_train + time_pred
-    
-    vol_pred_lstm = timeseries_to_volume(pred_lstm, spatial_shape)
-    
-    mae_lstm = np.mean(np.abs(vort_future - vol_pred_lstm))
-    rmse_lstm = np.sqrt(np.mean((vort_future - vol_pred_lstm)**2))
-    errors_dict['LSTM'] = {'mae': mae_lstm, 'rmse': rmse_lstm, 'time': time_lstm}
-    
+    print("\n" + "="*70)
+    t0 = time.time()
+    lstm_model = train_lstm(ts_context, args.horizon,
+                            epochs=args.lstm_epochs, batch_size=64, device=device)
+    pred_lstm  = forecast_lstm(lstm_model, ts_context, args.horizon, device=device)
+    time_lstm  = time.time() - t0
+    vol_lstm   = timeseries_to_volume(pred_lstm, spatial_shape)
+    mae_lstm   = float(np.mean(np.abs(vort_future - vol_lstm)))
+    rmse_lstm  = float(np.sqrt(np.mean((vort_future - vol_lstm)**2)))
+    errors_dict['LSTM'] = dict(mae=mae_lstm, rmse=rmse_lstm, time=time_lstm)
+    print(f"✓ LSTM : MAE={mae_lstm:.4f}  RMSE={rmse_lstm:.4f}  t={time_lstm:.2f}s")
+    create_animation_gif(vol_lstm, "Prédiction LSTM", "prediction_lstm",
+                         fps=args.gif_fps, obstacle_win=sim.obstacle_win)
 
-    print(f"\n✓ LSTM: MAE={mae_lstm:.4f}, RMSE={rmse_lstm:.4f}, Temps={time_lstm:.2f}s")
-    
-    create_animation_gif(vol_pred_lstm, "Prédiction LSTM",
-                        "prediction_lstm", fps=args.gif_fps,
-                        vmin=vorticity_full.min(), vmax=vorticity_full.max())
-
-    # ============================================================
+    # --------------------------------------------------------
     # 3. GIF COMPARATIF
-    # ============================================================
-    print("\n" + "=" * 70)
-    print("CRÉATION GIF COMPARATIF")
-    print("=" * 70)
+    # --------------------------------------------------------
+    create_comparison_gif(vort_future, vol_tfm, vol_ar, vol_lstm,
+                          filename="comparison_all",
+                          fps=args.gif_fps,
+                          obstacle_win=sim.obstacle_win)
 
-    if not args.skip_arima:
-        create_comparison_gif(vort_future, vol_pred_timesfm, vol_pred_arima, vol_pred_lstm,
-                            filename="comparison_all", fps=args.gif_fps)
-    else:
-        # Version sans ARIMA (3 modèles)
-        print(f"\n🎬 Création du GIF comparatif (sans ARIMA)...")
-        
-        nt = vort_future.shape[0]
-        vmin = min(vort_future.min(), vol_pred_timesfm.min(), vol_pred_lstm.min())
-        vmax = max(vort_future.max(), vol_pred_timesfm.max(), vol_pred_lstm.max())
-        
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-        fig.suptitle('Comparaison - Allée de Karman', fontsize=16, fontweight='bold')
-        
-        titles = ['Ground Truth', 'TimesFM', 'LSTM']
-        volumes = [vort_future, vol_pred_timesfm, vol_pred_lstm]
-        
-        def update(frame):
-            for ax, vol, title in zip(axes, volumes, titles):
-                ax.clear()
-                im = ax.imshow(vol[frame].T, cmap='RdBu_r', origin='lower',
-                            aspect='auto', vmin=vmin, vmax=vmax)
-                ax.set_title(f'{title} (t={frame})', fontsize=12)
-                ax.set_xlabel('X')
-                ax.set_ylabel('Y')
-            return axes
-        
-        anim = FuncAnimation(fig, update, frames=nt, interval=1000//args.gif_fps, blit=False)
-        
-        path = os.path.join(RESULTS_DIR, "comparison_all.gif")
-        writer = PillowWriter(fps=args.gif_fps)
-        anim.save(path, writer=writer)
-        plt.close()
-        
-        print(f"   ✓ Sauvegardé: comparison_all.gif")
-
-    # ============================================================
+    # --------------------------------------------------------
     # 4. GRAPHIQUES DE PERFORMANCE
-    # ============================================================
-    print("\n" + "=" * 70)
-    print("GRAPHIQUES DE PERFORMANCE")
-    print("=" * 70)
+    # --------------------------------------------------------
+    plot_errors_comparison(errors_dict, "performance_comparison")
 
-    plot_errors_comparison(errors_dict, filename="performance_comparison")
-
-    # Évolution temporelle en quelques points
-    print("\n📊 Évolution temporelle en points clés...")
-
-    points = [
-        (args.nx // 2, args.ny // 2, "center"),
-        (3 * args.nx // 4, args.ny // 2, "downstream"),
-        (args.nx // 4 + 20, args.ny // 2 + 5, "near_obstacle")
+    # Évolution temporelle en 3 points de la fenêtre
+    pts = [
+        (args.nx_win // 2,       args.ny_win // 2,       "center"),
+        (3 * args.nx_win // 4,   args.ny_win // 2,       "downstream"),
+        (args.nx_win // 4 + 20,  args.ny_win // 2 + 5,   "near_obstacle"),
     ]
-
-    for x, y, label in points:
+    for x, y, label in pts:
         fig, ax = plt.subplots(figsize=(12, 5))
-        
-        # Série vraie
-        true_series = vorticity_full[:, x, y]
-        ax.plot(range(len(true_series)), true_series, 
-            'k-', linewidth=2, label='Ground Truth', alpha=0.8)
-        
-        # Prédictions
-        pred_timesfm_series = vol_pred_timesfm[:, x, y]
-        ax.plot(range(context_len, context_len + args.horizon), 
-            pred_timesfm_series, 
-            'r--', linewidth=2, label='TimesFM', alpha=0.8)
-        
-        if not args.skip_arima:
-            pred_arima_series = vol_pred_arima[:, x, y]
+        true_s = vorticity_full[:, x, y]
+        ax.plot(true_s, 'k-', lw=2, label='Ground Truth', alpha=0.8)
+        for name, vol, style in [
+                ('TimesFM', vol_tfm,  'r--'),
+                ('ARIMA',   vol_ar,   'g--'),
+                ('LSTM',    vol_lstm, 'b--')]:
+            if name == 'ARIMA' and args.skip_arima:
+                continue
             ax.plot(range(context_len, context_len + args.horizon),
-                pred_arima_series,
-                'g--', linewidth=2, label='ARIMA', alpha=0.8)
-        
-        pred_lstm_series = vol_pred_lstm[:, x, y]
-        ax.plot(range(context_len, context_len + args.horizon),
-            pred_lstm_series,
-            'b--', linewidth=2, label='LSTM', alpha=0.8)
-        
-        ax.axvline(x=context_len, color='gray', linestyle=':',
-                linewidth=1.5, label='Forecast Start')
-        
-        ax.set_xlabel('Time Step', fontsize=12)
+                    vol[:, x, y], style, lw=2, label=name, alpha=0.8)
+        ax.axvline(context_len, color='gray', ls=':', lw=1.5, label='Forecast start')
+        ax.set_xlabel('Time step', fontsize=12)
         ax.set_ylabel('Vorticity', fontsize=12)
-        ax.set_title(f'Vorticity Evolution at ({x}, {y}) - {label}',
-                    fontsize=13, fontweight='bold')
-        ax.legend(fontsize=10)
-        ax.grid(True, alpha=0.3)
-        
+        ax.set_title(f'Vorticity @ ({x},{y}) — {label}',
+                     fontsize=13, fontweight='bold')
+        ax.legend(fontsize=10); ax.grid(alpha=0.3)
         plt.tight_layout()
         plt.savefig(os.path.join(RESULTS_DIR, f"evolution_{label}.png"),
-                dpi=150, bbox_inches='tight')
+                    dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"   Sauvegardé: evolution_{label}.png")
+        print(f"   Sauvegardé : evolution_{label}.png")
 
-    # ============================================================
+    # --------------------------------------------------------
     # 5. RAPPORT FINAL
-    # ============================================================
-    print("\n" + "=" * 70)
-    print("RAPPORT FINAL")
-    print("=" * 70)
+    # --------------------------------------------------------
+    print("\n" + "="*70)
+    print(f"{'Modèle':<12} {'MAE':>10} {'RMSE':>10} {'Temps (s)':>12}")
+    print("-"*46)
+    for m, d in errors_dict.items():
+        print(f"{m:<12} {d['mae']:>10.4f} {d['rmse']:>10.4f} {d['time']:>12.2f}")
 
-    print(f"\n📊 Performances des modèles:")
-    print(f"\n{'Modèle':<15} {'MAE':<12} {'RMSE':<12} {'Temps (s)':<12}")
-    print("-" * 55)
+    best = min(errors_dict, key=lambda k: errors_dict[k]['mae'])
+    fast = min(errors_dict, key=lambda k: errors_dict[k]['time'])
+    print(f"\n🏆 Meilleur (MAE) : {best}  ({errors_dict[best]['mae']:.4f})")
+    print(f"⚡ Plus rapide    : {fast}  ({errors_dict[fast]['time']:.2f}s)")
+    print(f"\n✓ Résultats dans ./{RESULTS_DIR}/")
+    print("="*70)
 
-    for model_name in errors_dict:
-        mae = errors_dict[model_name]['mae']
-        rmse = errors_dict[model_name]['rmse']
-        t = errors_dict[model_name]['time']
-        print(f"{model_name:<15} {mae:<12.4f} {rmse:<12.4f} {t:<12.2f}")
-
-    print(f"\n⚡ Speedup par rapport à la simulation exacte ({time_sim:.2f}s):")
-    for model_name in errors_dict:
-        speedup = time_sim / errors_dict[model_name]['time']
-        print(f"   {model_name}: {speedup:.2f}x plus rapide")
-
-    best_mae_model = min(errors_dict, key=lambda x: errors_dict[x]['mae'])
-    best_speed_model = min(errors_dict, key=lambda x: errors_dict[x]['time'])
-
-    print(f"\n🏆 Meilleur modèle (précision): {best_mae_model} "
-        f"(MAE={errors_dict[best_mae_model]['mae']:.4f})")
-    print(f"⚡ Modèle le plus rapide: {best_speed_model} "
-        f"({errors_dict[best_speed_model]['time']:.2f}s)")
-
-    print("\n📁 Fichiers générés:")
-    print(f"   • simulation_exact.gif")
-    print(f"   • prediction_timesfm.gif")
-    if not args.skip_arima:
-        print(f"   • prediction_arima.gif")
-    print(f"   • prediction_lstm.gif")
-    print(f"   • comparison_all.gif")
-    print(f"   • performance_comparison.png")
-    print(f"   • evolution_*.png (3 points)")
-
-    print("\n" + "=" * 70)
-    print(f"✓ Tous les résultats sauvegardés dans ./{RESULTS_DIR}/")
-    print("=" * 70)
 
 if __name__ == "__main__":
     main()
