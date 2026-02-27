@@ -23,10 +23,15 @@
 #python main.py --convection=[10,15,face,80,top] --total 200 --horizon 40
 
 # Chauffage localisé + refroidissement
-python main.py \
-  --disruption=[8,12,12,250,40] \
-  --convection=[5,12,rectangle,100,top,8,20,8,20] \
-  --total 180 --horizon 50 --material copper
+#python main.py \
+#  --disruption=[8,12,12,250,40] \
+# --convection=[5,12,rectangle,100,top,8,20,8,20] \
+#  --total 180 --horizon 50 --material copper
+
+python main_chronos.py \
+  --total 200 --horizon 50 \
+  --nx 20 --ny 20 --nz 20 \
+  --material steel
 
 # Convection circulaire intense
 #python main.py --convection=[0,20,circle,50,bottom,12,12,7] --nx 24 --ny 24 --nz 24 --material steel
