@@ -1,0 +1,14 @@
+name: 103
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - matplotlib
+  - statsmodels
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pip
