@@ -625,7 +625,7 @@ def main():
 
     create_animation_gif(vorticity_full,
                          "Simulation exacte — Allée de Kármán",
-                         "simulation_exact",
+                         "simulation_exact_kar",
                          fps=args.gif_fps,
                          obstacle_win=sim.obstacle_win)
 
@@ -656,7 +656,7 @@ def main():
     rmse_tfm = float(np.sqrt(np.mean((vort_future - vol_tfm)**2)))
     errors_dict['TimesFM'] = dict(mae=mae_tfm, rmse=rmse_tfm, time=time_tfm)
     print(f"✓ TimesFM : MAE={mae_tfm:.4f}  RMSE={rmse_tfm:.4f}  t={time_tfm:.2f}s")
-    create_animation_gif(vol_tfm, "Prédiction TimesFM", "prediction_timesfm",
+    create_animation_gif(vol_tfm, "Prédiction TimesFM", "prediction_timesfm_kar",
                          fps=args.gif_fps, obstacle_win=sim.obstacle_win)
 
     # --- Chronos ---
@@ -676,7 +676,7 @@ def main():
         rmse_chronos = float(np.sqrt(np.mean((vort_future - vol_chronos)**2)))
         errors_dict['Chronos'] = dict(mae=mae_chronos, rmse=rmse_chronos, time=time_chronos)
         print(f"✓ Chronos : MAE={mae_chronos:.4f}  RMSE={rmse_chronos:.4f}  t={time_chronos:.2f}s")
-        create_animation_gif(vol_chronos, "Prédiction Chronos", "prediction_chronos",
+        create_animation_gif(vol_chronos, "Prédiction Chronos", "prediction_chronos_kar",
                              fps=args.gif_fps, obstacle_win=sim.obstacle_win)
     else:
         print("\n⚠️  Chronos ignoré")
@@ -694,7 +694,7 @@ def main():
         rmse_ar = float(np.sqrt(np.mean((vort_future - vol_ar)**2)))
         errors_dict['ARIMA'] = dict(mae=mae_ar, rmse=rmse_ar, time=time_ar)
         print(f"✓ ARIMA : MAE={mae_ar:.4f}  RMSE={rmse_ar:.4f}  t={time_ar:.2f}s")
-        create_animation_gif(vol_ar, "Prédiction ARIMA", "prediction_arima",
+        create_animation_gif(vol_ar, "Prédiction ARIMA", "prediction_arima_kar",
                              fps=args.gif_fps, obstacle_win=sim.obstacle_win)
     else:
         print("\n⚠️  ARIMA ignoré")
@@ -713,27 +713,27 @@ def main():
     rmse_lstm  = float(np.sqrt(np.mean((vort_future - vol_lstm)**2)))
     errors_dict['LSTM'] = dict(mae=mae_lstm, rmse=rmse_lstm, time=time_lstm)
     print(f"✓ LSTM : MAE={mae_lstm:.4f}  RMSE={rmse_lstm:.4f}  t={time_lstm:.2f}s")
-    create_animation_gif(vol_lstm, "Prédiction LSTM", "prediction_lstm",
+    create_animation_gif(vol_lstm, "Prédiction LSTM", "prediction_lstm_kar",
                          fps=args.gif_fps, obstacle_win=sim.obstacle_win)
 
     # --------------------------------------------------------
     # 3. GIF COMPARATIF
     # --------------------------------------------------------
     create_comparison_gif(vort_future, vol_tfm, vol_chronos, vol_ar, vol_lstm,
-                          filename="comparison_all",
+                          filename="comparison_all_kar",
                           fps=args.gif_fps,
                           obstacle_win=sim.obstacle_win)
 
     # --------------------------------------------------------
     # 4. GRAPHIQUES DE PERFORMANCE
     # --------------------------------------------------------
-    plot_errors_comparison(errors_dict, "performance_comparison")
+    plot_errors_comparison(errors_dict, "performance_comparison_kar")
 
     # Évolution temporelle en 3 points de la fenêtre
     pts = [
-        (args.nx_win // 2,       args.ny_win // 2,       "center"),
-        (3 * args.nx_win // 4,   args.ny_win // 2,       "downstream"),
-        (args.nx_win // 4 + 20,  args.ny_win // 2 + 5,   "near_obstacle"),
+        (args.nx_win // 2,       args.ny_win // 2,       "center_kar"),
+        (3 * args.nx_win // 4,   args.ny_win // 2,       "downstream_kar"),
+        (args.nx_win // 4 + 20,  args.ny_win // 2 + 5,   "near_obstacle_kar"),
     ]
     for x, y, label in pts:
         fig, ax = plt.subplots(figsize=(12, 5))

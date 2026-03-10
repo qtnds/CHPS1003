@@ -28,10 +28,15 @@
 # --convection=[5,12,rectangle,100,top,8,20,8,20] \
 #  --total 180 --horizon 50 --material copper
 
-python main_chronos.py \
+python main_chronos2.py \
   --total 200 --horizon 50 \
   --nx 20 --ny 20 --nz 20 \
   --material steel
+
+#python main_chronos2.py \
+#  --disruption=[8,12,12,250,40] \
+#  --convection=[5,12,rectangle,100,top,8,20,8,20] \
+#  --total 180 --horizon 50 --material copper
 
 # Convection circulaire intense
 #python main.py --convection=[0,20,circle,50,bottom,12,12,7] --nx 24 --ny 24 --nz 24 --material steel
